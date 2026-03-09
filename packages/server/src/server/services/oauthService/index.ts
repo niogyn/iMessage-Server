@@ -874,22 +874,63 @@ export class OauthService extends Loggable {
     }
 
     async listFirebaseProjects(): Promise<Array<{ projectId: string; displayName: string }>> {
-        const url = "https://firebase.googleapis.com/v1beta1/projects";
-        const res = await this.sendRequest("GET", url);
-        return (res.data?.results ?? []).map((p: any) => ({
-            projectId: p.projectId,
-            displayName: p.displayName ?? p.projectId
-        }));
+        const projects: Array<{ projectId: string; displayName: string }> = [];
+
+        // First, list existing Firebase projects
+        try {
+            const fbUrl = "https://firebase.googleapis.com/v1beta1/projects";
+            let pageToken: string = null;
+            do {
+                const params = pageToken ? { pageToken } : null;
+                const res = await this.sendRequest("GET", fbUrl, null, params);
+                for (const p of res.data?.results ?? []) {
+                    projects.push({
+                        projectId: p.projectId,
+                        displayName: p.displayName ?? p.projectId
+                    });
+                }
+                pageToken = res.data?.nextPageToken ?? null;
+            } while (pageToken);
+        } catch {
+            // May not have any Firebase projects yet
+        }
+
+        // Then, list GCP projects available for Firebase (not yet added)
+        try {
+            const availUrl = "https://firebase.googleapis.com/v1beta1/availableProjects";
+            let pageToken: string = null;
+            do {
+                const params = pageToken ? { pageToken } : null;
+                const res = await this.sendRequest("GET", availUrl, null, params);
+                for (const p of res.data?.projectInfo ?? []) {
+                    const id = p.project?.replace("projects/", "") ?? "";
+                    if (id && !projects.some(existing => existing.projectId === id)) {
+                        projects.push({
+                            projectId: id,
+                            displayName: p.displayName ?? id
+                        });
+                    }
+                }
+                pageToken = res.data?.nextPageToken ?? null;
+            } while (pageToken);
+        } catch {
+            // availableProjects may not be accessible
+        }
+
+        return projects;
     }
 
     async handleExistingProjectSetup(projectId: string) {
         try {
             this.setStatus(ProgressStatus.IN_PROGRESS);
 
-            this.log.info(`Configuring existing Firebase project: ${projectId}`);
+            this.log.info(`Configuring project: ${projectId}`);
 
             this.log.info("Enabling required APIs...");
             await this.enableAllServices(projectId);
+
+            this.log.info("Ensuring Firebase is added to the project...");
+            await this.addFirebase(projectId);
 
             this.log.info("Checking Firestore...");
             await this.createDatabase(projectId);
