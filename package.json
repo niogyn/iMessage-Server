@@ -25,6 +25,10 @@
         "node": "20.11.x",
         "npm": ">=10.x"
     },
+    "overrides": {
+        "underscore": "^1.13.8",
+        "tar": "^7.5.10"
+    },
     "devDependencies": {
         "concurrently": "^7.0.0"
     }
