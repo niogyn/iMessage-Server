@@ -39,11 +39,13 @@ type StepItem = {
 export const WalkthroughLayout = ({...rest}): JSX.Element => {
     const alertRef = useRef(null);
     const [openNgrokAlert, setOpenNgrokAlert] = useBoolean(false);
+    const [openFcmAlert, setOpenFcmAlert] = useBoolean(false);
     const [step, setStep] = useState(0);
     const [completedSteps, setCompletedSteps] = useState([] as Array<number>);
     const proxyService: string = useAppSelector(state => state.config.proxy_service ?? '');
     const ngrokToken: string = useAppSelector(state => state.config.ngrok_key ?? '');
     const password: string = useAppSelector(state => state.config.password ?? '');
+    const fcmConfigured = useAppSelector(state => state.config.fcm_client !== null && state.config.fcm_server !== null);
     const bgColor = useBackground();
     
     // Links walkthrough steps and the values they rely on to be completed
@@ -93,6 +95,8 @@ export const WalkthroughLayout = ({...rest}): JSX.Element => {
             onClick={() => {
                 if (step === steps.length - 1) {
                     toggleTutorialCompleted(true);
+                } else if (step === 2 && !fcmConfigured) {
+                    setOpenFcmAlert.on();
                 } else if (step === 3 && proxyService === 'ngrok' && ngrokToken.length === 0) {
                     setOpenNgrokAlert.on();
                 } else {
@@ -167,6 +171,23 @@ export const WalkthroughLayout = ({...rest}): JSX.Element => {
                     ) : nextButton}
                 </Flex>
             </Box>
+
+            <ConfirmationDialog
+                modalRef={alertRef}
+                title='Skip Firebase Configuration?'
+                body={
+                    'Firebase is not configured. Skipping this step will prevent push notifications ' +
+                    'from being delivered to your Android device, and server URL changes will not sync ' +
+                    'with BlueBubbles clients. Are you sure you want to continue?'
+                }
+                declineText="No, I'll configure it"
+                acceptText="Yes, skip for now"
+                onAccept={() => {
+                    setStep(step + 1);
+                }}
+                isOpen={openFcmAlert}
+                onClose={() => { setOpenFcmAlert.off(); }}
+            />
 
             <ConfirmationDialog
                 modalRef={alertRef}

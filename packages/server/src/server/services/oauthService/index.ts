@@ -1,6 +1,7 @@
 // HTTP libraries
 import KoaApp from "koa";
 import http from "http";
+import crypto from "crypto";
 import axios, { AxiosResponse } from "axios";
 
 // Internal libraries
@@ -16,9 +17,13 @@ import { BrowserWindow, HandlerDetails } from "electron";
 import { Loggable } from "@server/lib/logging/Loggable";
 import { ContactInterface } from "@server/api/interfaces/contactInterface";
 
-/**
- * This service class hhandles the initial oauth workflows
- */
+export type PreflightResult = {
+    tosAccepted: boolean;
+    existingProject: any;
+    hasBilling: boolean;
+    projectCount: number;
+};
+
 export class OauthService extends Loggable {
     tag = "OauthService";
 
@@ -38,6 +43,10 @@ export class OauthService extends Loggable {
 
     authToken: string;
 
+    refreshToken: string = null;
+
+    tokenExpiry: number = null;
+
     expiresIn: number;
 
     projectName = "BlueBubbles";
@@ -46,12 +55,15 @@ export class OauthService extends Loggable {
 
     private _packageName = "com.bluebubbles.messaging";
 
+    private codeVerifier: string = null;
+
     private firebaseScopes = [
         "https://www.googleapis.com/auth/cloudplatformprojects",
         "https://www.googleapis.com/auth/service.management",
         "https://www.googleapis.com/auth/firebase",
         "https://www.googleapis.com/auth/datastore",
-        "https://www.googleapis.com/auth/iam"
+        "https://www.googleapis.com/auth/iam",
+        "https://www.googleapis.com/auth/cloud-billing"
     ];
 
     private contactScopes = [
@@ -65,6 +77,15 @@ export class OauthService extends Loggable {
     constructor() {
         super();
         this.oauthClient = new google.auth.OAuth2(this.clientId, null, this.callbackUrl);
+    }
+
+    private generatePkce(): { verifier: string; challenge: string } {
+        const verifier = crypto.randomBytes(32).toString("base64url");
+        const challenge = crypto
+            .createHash("sha256")
+            .update(verifier)
+            .digest("base64url");
+        return { verifier, challenge };
     }
 
     set packageName(name: string) {
@@ -85,12 +106,38 @@ export class OauthService extends Loggable {
     configureKoa() {
         if (!this.koaApp) return;
 
-        // Create a route to intercept the oauth callback
         this.koaApp.use(async (ctx, _) => {
             if (ctx.path === "/oauth/callback") {
-                this.log.info("Received OAuth callback");
-                ctx.body = "Success! You can close this window and return to the BlueBubbles Server app";
-                ctx.status = 200;
+                const code = ctx.query.code as string;
+                if (code && this.codeVerifier) {
+                    try {
+                        const { tokens } = await this.oauthClient.getToken({
+                            code,
+                            codeVerifier: this.codeVerifier
+                        });
+
+                        this.authToken = tokens.access_token;
+                        this.refreshToken = tokens.refresh_token ?? null;
+                        this.tokenExpiry = tokens.expiry_date ?? null;
+                        this.expiresIn = tokens.expiry_date
+                            ? Math.floor((tokens.expiry_date - Date.now()) / 1000)
+                            : 3600;
+                        this.oauthClient.setCredentials(tokens);
+
+                        Server().emitToUI("oauth-authenticated", {});
+
+                        this.log.info("OAuth authentication successful");
+                        ctx.body = "Success! You can close this window and return to BlueBubbles.";
+                        ctx.status = 200;
+                    } catch (ex: any) {
+                        this.log.error(`Token exchange failed: ${ex?.message}`);
+                        ctx.body = "Authentication failed. Please close this window and try again.";
+                        ctx.status = 500;
+                    }
+                } else {
+                    ctx.body = "Success! You can close this window and return to BlueBubbles.";
+                    ctx.status = 200;
+                }
             } else {
                 ctx.body = "Not found";
                 ctx.status = 404;
@@ -119,23 +166,17 @@ export class OauthService extends Loggable {
                 throw new Error(`Project "${this.projectName}" was not found! Please restart the setup process.`);
             }
 
-            // Enable the required APIs
-            await this.enableCloudApis(projectId);
-            await this.enableCloudResourceManager(projectId);
-            await this.enableFirebaseManagementApi(projectId);
-            await this.enableFirestoreApi(projectId);
+            await this.enableAllServices(projectId);
 
             this.log.info(`Adding Firebase to Google Cloud Project`);
             await this.addFirebase(projectId);
 
-            this.log.info(`Waiting for Service Account to generate (this may take some time)...`);
-            const serviceAccountJson = await this.getServiceAccount(projectId);
-
-            this.log.info(`Creating Firestore...`);
-            await this.createDatabase(projectId);
-
-            this.log.info(`Creating Android Configuration...`);
-            await this.createAndroidApp(projectId);
+            this.log.info(`Configuring project resources in parallel...`);
+            const [serviceAccountJson] = await Promise.all([
+                this.getServiceAccount(projectId),
+                this.createDatabase(projectId),
+                this.createAndroidApp(projectId)
+            ]);
 
             this.log.info(`Generating Google Services JSON (this may take some time)...`);
             const servicesJson = await this.getGoogleServicesJson(projectId);
@@ -274,23 +315,30 @@ export class OauthService extends Loggable {
      * @returns The OAuth URL
      */
     async getFirebaseOauthUrl() {
-        const url = await this.oauthClient.generateAuthUrl({
+        const { verifier, challenge } = this.generatePkce();
+        this.codeVerifier = verifier;
+
+        const url = this.oauthClient.generateAuthUrl({
             scope: this.firebaseScopes,
-            response_type: "token"
+            response_type: "code",
+            access_type: "offline",
+            code_challenge_method: "S256",
+            code_challenge: challenge
         });
 
         return `${url}&type=firebase`;
     }
 
-    /**
-     * Generates the OAuth URL for the client/UI to use.
-     *
-     * @returns The OAuth URL
-     */
     async getContactsOauthUrl() {
-        const url = await this.oauthClient.generateAuthUrl({
+        const { verifier, challenge } = this.generatePkce();
+        this.codeVerifier = verifier;
+
+        const url = this.oauthClient.generateAuthUrl({
             scope: this.contactScopes,
-            response_type: "token"
+            response_type: "code",
+            access_type: "offline",
+            code_challenge_method: "S256",
+            code_challenge: challenge
         });
 
         return `${url}&type=contacts`;
@@ -391,6 +439,26 @@ export class OauthService extends Loggable {
             `Project "${this.projectName}" was not found! Please restart the setup process.`
         );
         return (projectData.projects ?? []).find((p: any) => p.projectId === projectId);
+    }
+
+    async enableAllServices(projectId: string) {
+        this.log.info("Enabling required APIs (batch)...");
+        const url = `https://serviceusage.googleapis.com/v1/projects/${projectId}/services:batchEnable`;
+        const data = {
+            serviceIds: [
+                "cloudapis.googleapis.com",
+                "cloudresourcemanager.googleapis.com",
+                "firebase.googleapis.com",
+                "firestore.googleapis.com",
+                "iam.googleapis.com"
+            ]
+        };
+        const res = await this.tryUntilNoError("POST", url, data, 5, 5000);
+        const operationName = res.name;
+        if (operationName && !operationName.endsWith("DONE_OPERATION")) {
+            const operationUrl = `https://serviceusage.googleapis.com/v1/${operationName}`;
+            await this.waitForData("GET", operationUrl, null, "done", 30, 5000);
+        }
     }
 
     async enableCloudApis(projectId: string) {
@@ -753,6 +821,152 @@ export class OauthService extends Loggable {
         await app.delete();
     }
 
+    async linkBilling(projectId: string): Promise<boolean> {
+        try {
+            const listUrl = "https://cloudbilling.googleapis.com/v1/billingAccounts";
+            const listRes = await this.sendRequest("GET", listUrl);
+            const accounts = listRes.data?.billingAccounts ?? [];
+            const openAccount = accounts.find((a: any) => a.open === true);
+            if (!openAccount) return false;
+
+            this.log.info(`Linking billing account: ${openAccount.displayName}`);
+            const linkUrl = `https://cloudbilling.googleapis.com/v1/projects/${projectId}/billingInfo`;
+            await this.sendRequest("PUT", linkUrl, {
+                billingAccountName: openAccount.name
+            });
+            return true;
+        } catch (ex: any) {
+            this.log.debug(`Failed to link billing: ${ex?.message}`);
+            return false;
+        }
+    }
+
+    async preflight(): Promise<PreflightResult> {
+        const result: PreflightResult = {
+            tosAccepted: false,
+            existingProject: null,
+            hasBilling: false,
+            projectCount: 0
+        };
+
+        try {
+            const existing = await this.checkIfProjectExists();
+            result.tosAccepted = true;
+            result.existingProject = existing;
+        } catch (ex: any) {
+            if (ex.response?.data?.error?.message?.includes("Terms of Service")) {
+                result.tosAccepted = false;
+            } else {
+                result.tosAccepted = true;
+            }
+        }
+
+        try {
+            const listRes = await this.sendRequest("GET",
+                "https://cloudbilling.googleapis.com/v1/billingAccounts");
+            const accounts = listRes.data?.billingAccounts ?? [];
+            result.hasBilling = accounts.some((a: any) => a.open === true);
+        } catch {
+            // No billing scope or error -- leave as false
+        }
+
+        return result;
+    }
+
+    async listFirebaseProjects(): Promise<Array<{ projectId: string; displayName: string }>> {
+        const url = "https://firebase.googleapis.com/v1beta1/projects";
+        const res = await this.sendRequest("GET", url);
+        return (res.data?.results ?? []).map((p: any) => ({
+            projectId: p.projectId,
+            displayName: p.displayName ?? p.projectId
+        }));
+    }
+
+    async handleExistingProjectSetup(projectId: string) {
+        try {
+            this.setStatus(ProgressStatus.IN_PROGRESS);
+
+            this.log.info(`Configuring existing Firebase project: ${projectId}`);
+
+            this.log.info("Enabling required APIs...");
+            await this.enableAllServices(projectId);
+
+            this.log.info("Checking Firestore...");
+            await this.createDatabase(projectId);
+
+            this.log.info("Checking Android configuration...");
+            await this.createAndroidApp(projectId);
+
+            this.log.info("Generating service account credentials...");
+            const serviceAccountJson = await this.getServiceAccount(projectId);
+
+            this.log.info("Fetching client configuration...");
+            const servicesJson = await this.getGoogleServicesJson(projectId);
+
+            const serverFcm = FileSystem.getFCMServer();
+            if (serverFcm?.project_id != null && serviceAccountJson?.project_id !== serverFcm?.project_id) {
+                this.log.warn("Firebase project changed -- clearing device registrations.");
+                await Server().repo.devices().clear();
+            }
+
+            FileSystem.saveFCMServer(serviceAccountJson);
+            FileSystem.saveFCMClient(servicesJson);
+
+            this.log.info("Configuring security rules...");
+            await this.createSecurityRules(projectId);
+
+            try {
+                this.log.info("Revoking OAuth token...");
+                await this.oauthClient.revokeToken(this.authToken);
+            } catch {
+                // Do nothing
+            }
+
+            this.log.info("Successfully configured existing Firebase project!");
+            this.setStatus(ProgressStatus.COMPLETED);
+
+            FCMService.stop()
+                .then(async () => {
+                    await waitMs(5000);
+                    await Server().fcm.clearConfig();
+                    await Server().fcm.start();
+                })
+                .catch(async err => {
+                    this.log.debug("FCM restart issue after existing project setup.");
+                    this.log.debug(err?.message ?? String(err));
+                });
+        } catch (ex: any) {
+            this.log.error(`Failed to configure project: ${ex?.message}`);
+            if (ex?.response?.data?.error) {
+                this.log.info(`Error: (${ex.response.data.error.code}) ${ex.response.data?.error?.message ?? "Unknown error"}`);
+            }
+
+            this.log.info("Use the setup button and try again. If the issue persists, please contact support.");
+            this.setStatus(ProgressStatus.FAILED);
+        } finally {
+            await this.stop();
+        }
+    }
+
+    async testFcmConfig(): Promise<{ success: boolean; message: string }> {
+        try {
+            const app = FCMService.getApp();
+            if (!app) {
+                return { success: false, message: "FCM service is not initialized." };
+            }
+
+            const serverConfig = FileSystem.getFCMServer();
+            if (!serverConfig?.project_id) {
+                return { success: false, message: "No server configuration found." };
+            }
+
+            await Server().fcm.validateProject(serverConfig.project_id);
+            return { success: true, message: "Firebase configuration is valid!" };
+        } catch (ex: any) {
+            return { success: false, message: ex?.message ?? "Validation failed." };
+        }
+    }
+
     async fetchContacts() {
         // Fetch the project data
         // eslint-disable-next-line max-len
@@ -808,15 +1022,36 @@ export class OauthService extends Loggable {
      * @param data The data to send (optional)
      * @returns The response object
      */
-    async sendRequest(method: "GET" | "POST" | "DELETE", url: string, data: Record<string, any> = null, params: Record<string, any> = null) {
+    private async refreshAccessToken() {
+        if (!this.refreshToken) {
+            throw new Error("OAuth token expired and no refresh token available. Please re-authenticate.");
+        }
+
+        this.log.debug("Refreshing expired OAuth token...");
+        this.oauthClient.setCredentials({ refresh_token: this.refreshToken });
+        const { credentials } = await this.oauthClient.refreshAccessToken();
+        this.authToken = credentials.access_token;
+        this.tokenExpiry = credentials.expiry_date ?? null;
+    }
+
+    async sendRequest(
+        method: "GET" | "POST" | "DELETE" | "PUT",
+        url: string,
+        data: Record<string, any> = null,
+        params: Record<string, any> = null
+    ) {
         if (!this.authToken) throw new Error("Missing auth token");
+
+        if (this.tokenExpiry && Date.now() > this.tokenExpiry - 300000) {
+            await this.refreshAccessToken();
+        }
 
         const headers: Record<string, string> = {
             Authorization: `Bearer ${this.authToken}`,
             Accept: "application/json"
         };
 
-        if (["POST", "DELETE"].includes(method) && data) {
+        if (["POST", "DELETE", "PUT"].includes(method) && data) {
             headers["Content-Type"] = "application/json";
         }
 

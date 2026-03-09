@@ -22,7 +22,6 @@ export class FirebaseOAuthWindow extends Window {
     }
 
     build(): FirebaseOAuthWindow {
-        // Create new Browser window
         if (this.instance && !this.instance.isDestroyed) this.instance.destroy();
         this.instance = new BrowserWindow({
             width: 800,
@@ -33,25 +32,21 @@ export class FirebaseOAuthWindow extends Window {
         });
 
         this.instance.loadURL(this.url);
-        this.instance.webContents.on("did-finish-load", () => {
-            const url = this.instance.webContents.getURL();
-            if (url.split("#")[0] !== Server().oauthService?.callbackUrl) return;
 
-            // Extract the token from the URL
-            const hash = url.split("#")[1];
-            const params = new URLSearchParams(hash);
-            const token = params.get("access_token");
-            const expires = params.get("expires_in");
-            Server().oauthService.authToken = token;
-            Server().oauthService.expiresIn = Number.parseInt(expires);
-            Server().oauthService.handleProjectCreation();
-
-            // Clear the window data
-            this.instance.close();
-            this.instance = null;
+        // With PKCE, the code exchange happens on the Koa callback server.
+        // The window just navigates through OAuth and redirects to the callback URL.
+        // The Koa handler exchanges the code, stores tokens, and emits oauth-authenticated.
+        this.instance.webContents.on("did-navigate", (_, navUrl) => {
+            if (navUrl.startsWith(Server().oauthService?.callbackUrl)) {
+                setTimeout(() => {
+                    if (this.instance && !this.instance.isDestroyed()) {
+                        this.instance.close();
+                        this.instance = null;
+                    }
+                }, 1500);
+            }
         });
 
-        // On window close, if the oauth service is not in progress, stop it
         this.instance.on("close", () => {
             if (Server().oauthService?.status !== ProgressStatus.IN_PROGRESS) {
                 Server().oauthService.stop();

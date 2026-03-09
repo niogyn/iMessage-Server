@@ -162,6 +162,26 @@ export const restartOauthService = async () => {
     return await ipcRenderer.invoke('restart-oauth-service');
 };
 
+export const listFirebaseProjects = async (): Promise<Array<{ projectId: string; displayName: string }>> => {
+    return await ipcRenderer.invoke('list-firebase-projects');
+};
+
+export const setupExistingProject = async (projectId: string): Promise<void> => {
+    return await ipcRenderer.invoke('setup-existing-project', projectId);
+};
+
+export const startProjectCreation = async (): Promise<void> => {
+    return await ipcRenderer.invoke('start-project-creation');
+};
+
+export const oauthPreflight = async (): Promise<any> => {
+    return await ipcRenderer.invoke('oauth-preflight');
+};
+
+export const testFcmConfig = async (): Promise<{ success: boolean; message: string }> => {
+    return await ipcRenderer.invoke('test-fcm-config');
+};
+
 export const getCurrentPermissions = async () => {
     return await ipcRenderer.invoke('get-current-permissions');
 };

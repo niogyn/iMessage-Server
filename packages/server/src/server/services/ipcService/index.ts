@@ -101,6 +101,12 @@ export class IPCService extends Loggable {
         });
 
         ipcMain.handle("set-fcm-server", async (_, args) => {
+            if (args != null) {
+                if (!args.project_id || !args.private_key_id || !args.private_key) {
+                    throw new Error("Invalid Admin SDK JSON: missing required fields (project_id, private_key_id, private_key)");
+                }
+            }
+
             FileSystem.saveFCMServer(args);
             if (!Server().fcm) {
                 Server().initFcm();
@@ -111,6 +117,12 @@ export class IPCService extends Loggable {
         });
 
         ipcMain.handle("set-fcm-client", async (_, args) => {
+            if (args != null) {
+                if (!args.project_info || !args.client || !args.configuration_version) {
+                    throw new Error("Invalid Google Services JSON: missing required fields (project_info, client, configuration_version)");
+                }
+            }
+
             FileSystem.saveFCMClient(args);
             if (!Server().fcm) {
                 Server().initFcm();
@@ -442,6 +454,28 @@ export class IPCService extends Loggable {
         ipcMain.handle("restart-oauth-service", async (_, __) => {
             if (Server().oauthService?.running) return;
             await Server().oauthService?.restart();
+        });
+
+        ipcMain.handle("list-firebase-projects", async () => {
+            if (!Server().oauthService?.authToken) return [];
+            return await Server().oauthService.listFirebaseProjects();
+        });
+
+        ipcMain.handle("setup-existing-project", async (_, projectId: string) => {
+            await Server().oauthService.handleExistingProjectSetup(projectId);
+        });
+
+        ipcMain.handle("start-project-creation", async () => {
+            await Server().oauthService.handleProjectCreation();
+        });
+
+        ipcMain.handle("oauth-preflight", async () => {
+            if (!Server().oauthService?.authToken) return null;
+            return await Server().oauthService.preflight();
+        });
+
+        ipcMain.handle("test-fcm-config", async () => {
+            return await Server().oauthService.testFcmConfig();
         });
 
         ipcMain.handle("save-lan-url", async (_, __) => {
