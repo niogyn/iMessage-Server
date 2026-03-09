@@ -7,6 +7,7 @@ import { IMessageCache, IMessagePoller } from "../pollers";
 import { MessageRepository } from "..";
 import { waitMs } from "@server/helpers/utils";
 import { DebounceSubsequentWithWait } from "@server/lib/decorators/DebounceDecorator";
+import { isMinTahoe } from "@server/env";
 
 export class IMessageListener extends Loggable {
     tag = "IMessageListener";
@@ -40,6 +41,7 @@ export class IMessageListener extends Loggable {
 
     stop() {
         this.stopped = true;
+        this.watcher?.stop();
         this.removeAllListeners();
     }
 
@@ -49,11 +51,24 @@ export class IMessageListener extends Loggable {
 
     getEarliestModifiedDate() {
         let earliest = new Date();
+        let found = false;
+
         for (const filePath of this.filePaths) {
-            const stat = fs.statSync(filePath);
-            if (stat.mtime < earliest) {
-                earliest = stat.mtime;
+            try {
+                if (!fs.existsSync(filePath)) continue;
+                const stat = fs.statSync(filePath);
+                if (stat.mtime < earliest) {
+                    earliest = stat.mtime;
+                }
+                found = true;
+            } catch {
+                // File may have been removed between exists check and stat
             }
+        }
+
+        if (!found) {
+            this.log.warn("No watched files found yet, using current time as baseline");
+            return new Date();
         }
 
         return earliest;
@@ -63,12 +78,10 @@ export class IMessageListener extends Loggable {
         this.lastCheck = this.getEarliestModifiedDate().getTime() - 60000;
         this.stopped = false;
 
-        // Perform an initial poll to kinda seed the cache.
-        // We'll use the earliest modified date of the files to determine the initial poll date.
-        // We'll also subtract 1 minute just to pre-load the cache with a little bit of data.
         await this.poll(new Date(this.lastCheck), false);
 
-        this.watcher = new MultiFileWatcher(this.filePaths);
+        const pollingIntervalMs = isMinTahoe ? 15000 : 0;
+        this.watcher = new MultiFileWatcher(this.filePaths, { pollingIntervalMs });
         this.watcher.on("change", async (event: FileChangeEvent) => {
             await this.handleChangeEvent(event);
         });
@@ -116,12 +129,34 @@ export class IMessageListener extends Loggable {
 
     async poll(after: Date, emitResults = true) {
         for (const poller of this.pollers) {
-            const results = await poller.poll(after);
+            try {
+                const results = await poller.poll(after);
 
-            if (emitResults) {
-                for (const result of results) {
-                    this.emit(result.eventType, result.data);
-                    await waitMs(10);
+                if (emitResults) {
+                    for (const result of results) {
+                        this.emit(result.eventType, result.data);
+                        await waitMs(10);
+                    }
+                }
+            } catch (error) {
+                this.log.error(`Poll failed for ${poller.tag}: ${error}`);
+
+                try {
+                    const healthy = await this.repo.healthCheck();
+                    if (!healthy) {
+                        this.log.warn("Database health check failed, attempting reconnect...");
+                        await this.repo.reconnect();
+                    }
+
+                    const retryResults = await poller.poll(after);
+                    if (emitResults) {
+                        for (const result of retryResults) {
+                            this.emit(result.eventType, result.data);
+                            await waitMs(10);
+                        }
+                    }
+                } catch (retryError) {
+                    this.log.error(`Retry failed for ${poller.tag}: ${retryError}`);
                 }
             }
         }

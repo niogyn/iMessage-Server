@@ -22,7 +22,7 @@
     },
     "homepage": "https://www.bluebubbles.app",
     "engines": {
-        "node": "20.11.x",
+        "node": ">=22.12.0",
         "npm": ">=10.x"
     },
     "overrides": {

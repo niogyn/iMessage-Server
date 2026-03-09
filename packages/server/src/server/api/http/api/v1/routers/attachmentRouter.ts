@@ -177,10 +177,9 @@ export class AttachmentRouter {
 
     static async uploadAttachment(ctx: RouterContext, _: Next) {
         const { files } = ctx.request;
-        const attachment = files?.attachment as unknown as File;
+        const attachment = files?.attachment as any;
 
-        // Create a filename using the hash & extension of the attachment
-        const location = await AttachmentInterface.upload(attachment.path, attachment.name);
+        const location = await AttachmentInterface.upload(attachment.path ?? attachment.filepath, attachment.name);
 
         // The path will essentially be "<attachment dir>/<uuid>/<hash>.ext".
         // We want to get the <uuid> and <hash> parts.

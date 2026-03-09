@@ -7,7 +7,7 @@ import { Chat } from "@server/databases/imessage/entity/Chat";
 import { Handle } from "@server/databases/imessage/entity/Handle";
 import { Message } from "@server/databases/imessage/entity/Message";
 import { Attachment } from "@server/databases/imessage/entity/Attachment";
-import { isNotEmpty } from "@server/helpers/utils";
+import { isNotEmpty, waitMs } from "@server/helpers/utils";
 import { isMinHighSierra, isMinVentura } from "@server/env";
 import { Loggable } from "@server/lib/logging/Loggable";
 
@@ -30,19 +30,52 @@ export class MessageRepository extends Loggable {
         this.db = null;
     }
 
-    /**
-     * Creates a connection to the iMessage database
-     */
-    async initialize() {
-        this.db = new DataSource({
-            name: "iMessage",
-            type: "better-sqlite3",
-            database: this.dbPath,
-            entities: [Chat, Handle, Message, Attachment]
-        });
+    async initialize(maxRetries = 3) {
+        let lastError: Error = null;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                this.db = new DataSource({
+                    name: "iMessage",
+                    type: "better-sqlite3",
+                    database: this.dbPath,
+                    entities: [Chat, Handle, Message, Attachment]
+                });
 
-        this.db = await this.db.initialize();
-        return this.db;
+                this.db = await this.db.initialize();
+                return this.db;
+            } catch (ex: any) {
+                lastError = ex;
+                this.log.warn(`iMessage DB init attempt ${attempt}/${maxRetries} failed: ${ex?.message ?? ex}`);
+                if (attempt < maxRetries) {
+                    await waitMs(1000 * Math.pow(2, attempt - 1));
+                }
+            }
+        }
+        throw lastError;
+    }
+
+    async healthCheck(): Promise<boolean> {
+        try {
+            if (!this.db?.isInitialized) return false;
+            await this.db.query("SELECT 1");
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    async reconnect(): Promise<DataSource> {
+        this.log.info("Reconnecting to iMessage database...");
+        try {
+            if (this.db?.isInitialized) {
+                await this.db.destroy();
+            }
+        } catch {
+            // Ignore errors during teardown
+        }
+
+        this.db = null;
+        return this.initialize(1);
     }
 
     async getiMessageAccount() {

@@ -16,7 +16,7 @@ npm run build-ui     # Build UI only, copies output to packages/server/dist/stat
 npm run build-server # Build server only
 ```
 
-**Required versions:** Node 20.11.x, npm >= 10.x, Python >= 3.10.x
+**Required versions:** Node >= 22.12, npm >= 10.x, Python >= 3.10.x
 
 ## Architecture
 
@@ -64,4 +64,4 @@ npm run build-server # Build server only
 
 - Branch naming: `<name>/<feature>` (e.g. `zach/improved-animations`)
 - PRs target the `development` branch
-- CI runs on push to `master` (macOS-13, Node 20.11, Python 3.10)
+- CI runs on push to `master` (macOS-13, Node 22, Python 3.10)

@@ -38,7 +38,7 @@ import { runTerminalScript, openSystemPreferences, startMessages } from "@server
 
 import { ActionHandler } from "./api/apple/actions";
 import { insertChatParticipants, isEmpty, isNotEmpty, waitMs } from "./helpers/utils";
-import { isMinBigSur, isMinCatalina, isMinHighSierra, isMinMojave, isMinMonterey, isMinSierra } from "./env";
+import { isMinBigSur, isMinCatalina, isMinHighSierra, isMinMojave, isMinMonterey, isMinSierra, isMinTahoe } from "./env";
 import { Proxy } from "./services/proxyServices/proxy";
 import { PrivateApiService } from "./api/privateApi/PrivateApiService";
 import { OutgoingMessageManager } from "./managers/outgoingMessageManager";
@@ -156,6 +156,8 @@ class BlueBubblesServer extends EventEmitter {
 
     iMessageListener: IMessageListener;
 
+    fdaMonitorTimer: ReturnType<typeof setInterval> | null;
+
     hasSetup: boolean;
 
     hasStarted: boolean;
@@ -173,24 +175,18 @@ class BlueBubblesServer extends EventEmitter {
     typingCache: string[];
 
     get hasDiskAccess(): boolean {
-        // As long as we've tried to initialize the DB, we know if we do/do not have access.
         const dbInit: boolean | null = this.iMessageRepo?.db?.isInitialized;
         if (dbInit != null) return dbInit;
 
-        // If we've never initialized the DB, and just want to detect if we have access,
-        // we can check the permissions using node-mac-permissions. However, default to true,
-        // if the macOS version is under Mojave.
-        let status = true;
-        if (isMinMojave) {
-            const authStatus = getAuthStatus("full-disk-access");
-            if (authStatus === "authorized") {
-                status = true;
-            } else {
-                this.logger.debug(`FullDiskAccess Permission Status: ${authStatus}`);
-            }
+        if (!isMinMojave) return true;
+
+        const authStatus = getAuthStatus("full-disk-access");
+        if (authStatus !== "authorized") {
+            this.logger.debug(`FullDiskAccess Permission Status: ${authStatus}`);
+            return false;
         }
 
-        return status;
+        return true;
     }
 
     get hasAccessibilityAccess(): boolean {
@@ -236,6 +232,7 @@ class BlueBubblesServer extends EventEmitter {
         this.scheduledMessages = null;
         this.oauthService = null;
         this.iMessageListener = null;
+        this.fdaMonitorTimer = null;
 
         this.hasSetup = false;
         this.hasStarted = false;
@@ -557,6 +554,10 @@ class BlueBubblesServer extends EventEmitter {
             await this.startChatListeners();
         }
 
+        if (isMinTahoe) {
+            this.startFdaMonitor();
+        }
+
         try {
             this.logger.info("Starting FCM service...");
             await this.fcm.start();
@@ -574,6 +575,8 @@ class BlueBubblesServer extends EventEmitter {
         } catch (ex: any) {
             this.logger.info(`Failed to stop FCM service! ${ex?.message ?? ex}`);
         }
+
+        this.stopFdaMonitor();
 
         try {
             this.removeChatListeners();
@@ -848,9 +851,14 @@ class BlueBubblesServer extends EventEmitter {
             await this.repo.setConfig("ngrok_protocol", "http");
         }
 
+        this.logger.info(
+            `Environment: macOS ${macosVersion() ?? "unknown"}, ` +
+            `Electron ${process.versions.electron ?? "unknown"}, ` +
+            `Node ${process.version}`
+        );
+
         this.logger.info("Checking Permissions...");
 
-        // Log if we dont have accessibility access
         if (this.hasAccessibilityAccess) {
             this.logger.info("Accessibility permissions are enabled");
         } else {
@@ -1595,10 +1603,44 @@ class BlueBubblesServer extends EventEmitter {
     }
 
     private removeChatListeners() {
-        // Remove all listeners
         this.logger.info("Removing chat listeners...");
         this.iMessageListener?.stop();
         this.iMessageListener = null;
+    }
+
+    private startFdaMonitor() {
+        let lastStatus = "authorized";
+        this.fdaMonitorTimer = setInterval(async () => {
+            const status = getAuthStatus("full-disk-access");
+            if (status !== lastStatus) {
+                if (status !== "authorized") {
+                    this.logger.error(
+                        `Full Disk Access was revoked (status: ${status}). ` +
+                        "iMessage database reads may fail until access is restored."
+                    );
+                    AlertsInterface.create(
+                        "error",
+                        `Full Disk Access was revoked (${status}). Re-enable in System Settings > Privacy & Security.`
+                    );
+                } else {
+                    this.logger.info("Full Disk Access restored, attempting iMessage DB reconnect...");
+                    try {
+                        await this.iMessageRepo?.reconnect();
+                        AlertsInterface.create("info", "Full Disk Access restored. iMessage database reconnected.");
+                    } catch (ex: any) {
+                        this.logger.error(`Failed to reconnect after FDA restoration: ${ex?.message ?? ex}`);
+                    }
+                }
+                lastStatus = status;
+            }
+        }, 300000);
+    }
+
+    private stopFdaMonitor() {
+        if (this.fdaMonitorTimer) {
+            clearInterval(this.fdaMonitorTimer);
+            this.fdaMonitorTimer = null;
+        }
     }
 
     /**

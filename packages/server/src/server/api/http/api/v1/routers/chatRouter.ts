@@ -290,12 +290,12 @@ export class ChatRouter {
     static async setGroupChatIcon(ctx: RouterContext, _: Next) {
         const { files } = ctx.request;
         const { guid } = ctx.params;
-        const icon = files?.icon as unknown as File;
+        const icon = files?.icon as any;
 
         const [chats, __] = await Server().iMessageRepo.getChats({ chatGuid: guid, withParticipants: true });
         if (isEmpty(chats)) throw new NotFound({ error: "Chat does not exist!" });
 
-        await ChatInterface.setGroupChatIcon(chats[0], icon.path);
+        await ChatInterface.setGroupChatIcon(chats[0], icon.path ?? icon.filepath);
         return new Success(ctx, { message: "Successfully set group chat icon!" }).send();
     }
 
